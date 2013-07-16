@@ -15,7 +15,7 @@ long linesPrinted = 0;
 
 int m_nCurrStroke = 1;
 int m_nStrokeMem = m_nCurrStroke;
-boolean m_bTest = true;
+boolean m_bTest = false;
 boolean m_bErase = false;
 int canvasWidth = 1000;
 int maxCanvasWidth = 4096;
@@ -68,7 +68,12 @@ void setupPrinter(){
   //p.connect(p.list()[0], 9600);
   println(Serial.list());
   println(p.list());
-  p.connect(Serial.list()[0], baudRate);
+  try{
+    p.connect(Serial.list()[0], baudRate);
+  } catch(Exception e){
+    m_bTest = true;
+    p = null;
+  }
 }
 
 void draw(){
@@ -122,7 +127,7 @@ private void drawCursor(){
       if (currMouseAngle > m_nMouseStartRotation){
         arc(width/2, height/2, 200, 200, m_nMouseStartRotation, currMouseAngle, PIE); 
       } else {
-        arc(width/2, height/2, 200, 200, currMouseAngle, m_nMouseStartRotation, PIE);
+        arc(width/2, height/2, 200, 200, m_nMouseStartRotation, currMouseAngle + PI*2, PIE);//currMouseAngle, m_nMouseStartRotation, PIE);
       }
       textAlign(CENTER, CENTER);
       fill(255,100,0);
@@ -264,9 +269,9 @@ void mouseDragged(){
     canvasWidth = constrain(canvasWidth + (mouseX - pmouseX), 1, maxCanvasWidth);
   } else {
     drawLineOnCanvas(mouseX, mouseY, pmouseX, pmouseY);
-    if (m_bLooping){
+    /*if (m_bLooping){
       drawLineOnCanvas(mouseX + canvasWidth, mouseY, pmouseX + canvasWidth, pmouseY);
-    }
+    }*/
   }
 }
 
@@ -277,6 +282,13 @@ void drawLineOnCanvas(int mouseX, int mouseY, int pmouseX, int pmouseY){
     adjustForDrawing();
     drawing.line(pmouseX, pmouseY, mouseX, mouseY);
     drawing.popMatrix();
+    if (m_bLooping){
+      drawing.pushMatrix();
+      drawing.translate(canvasWidth, 0);
+      adjustForDrawing();
+      drawing.line(pmouseX, pmouseY, mouseX, mouseY);
+      drawing.popMatrix();
+    }
     cleanUpOverdraw();
     drawing.endDraw();
 }
