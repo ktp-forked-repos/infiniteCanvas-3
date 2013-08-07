@@ -1,5 +1,7 @@
 import quinkennedy.thermal_printer.*;
 import processing.serial.*;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 
 SerialThermalPrint p;
 PGraphics drawn, drawing;
@@ -19,7 +21,7 @@ boolean m_bTest = false;
 boolean m_bErase = false;
 int canvasWidth = 1000;
 int maxCanvasWidth = 4096;
-int baudRate = 9600;
+int baudRate = 38400;//9600;300;38400;
 float m_nCurrRotation = 0;
 float m_nMouseStartRotation = 0;
 float m_nCanvasStartRotation = 0;
@@ -29,12 +31,36 @@ boolean m_bShowHelp = false;
 boolean m_bAdjustCanvasWidth = false;
 boolean m_bMoveOffset = true;
 PImage openHand, closedHand, rotateCursor, resizeCursor;
+StartScreen startScreen;
+State currState;
+Lock drawingLock = new ReentrantLock();
 
 void setup(){
   size(displayWidth, displayHeight);
+  startScreen = new StartScreen(this);
   //size(1000, SerialThermalPrint.MAX_WIDTH);
   setupGraphics();
-  setupPrinter();
+  currState = State.START;
+}
+
+public void begin(String printer, int durationMillis){
+  if (printer == null || printer.length() == 0){
+    m_bTest = true;
+  } else {
+    try{
+      m_bTest = false;
+      p = new SerialThermalPrint(this);
+      Serial s = new Serial(this, printer, baudRate);
+      p.usePrinter(s);
+    } catch (Exception e){
+      println("exception while setting up printer, entering test mode");
+      m_bTest = true;
+      println(e);
+      println(e.getStackTrace());
+      p = null;
+    }
+  }
+  currState = State.DRAWING;
   noCursor();
 }
 
@@ -46,10 +72,15 @@ void setupGraphics(){
   drawn.noStroke();
   drawn.rect(0, 0, drawn.width, drawn.height);
   drawn.endDraw();
-  drawing = createGraphics(maxCanvasWidth, SerialThermalPrint.MAX_WIDTH);
-  drawing.beginDraw();
-  drawing.background(255);
-  drawing.endDraw();
+  drawingLock.lock();
+  try{
+    drawing = createGraphics(maxCanvasWidth, SerialThermalPrint.MAX_WIDTH);
+    drawing.beginDraw();
+    drawing.background(255);
+    drawing.endDraw();
+  } finally {
+    drawingLock.unlock();
+  }
   line = createImage(SerialThermalPrint.MAX_WIDTH, 1, ARGB);
   
   //load cursors
@@ -59,53 +90,42 @@ void setupGraphics(){
   resizeCursor = loadImage("move-cursor.png");
 }
 
-void setupPrinter(){
-  if (m_bTest){
-    return;
-  }
-  p = new SerialThermalPrint(this);
-  //println(p.list());
-  //p.connect(p.list()[0], 9600);
-  println(Serial.list());
-  println(p.list());
-  try{
-    p.connect(Serial.list()[0], baudRate);
-  } catch(Exception e){
-    m_bTest = true;
-    p = null;
-  }
-}
-
 void draw(){
-  drawing.strokeWeight(m_nCurrStroke);
-  background(50);
-  pushMatrix();
-  translate(width/2, height/2);
-  if (m_bRotate && mousePressed){
-    updateCanvasRotation();
+  switch (currState){
+    case START:
+      startScreen.draw();
+      break;
+    case DRAWING:
+      background(50);
+      pushMatrix();
+      translate(width/2, height/2);
+      if (m_bRotate && mousePressed){
+        updateCanvasRotation();
+      }
+      rotate(m_nCurrRotation);
+      translate(-canvasWidth/2, -SerialThermalPrint.MAX_WIDTH/2);
+      if (m_bLooping){
+        image(drawing, 0, 0, drawingOffset, SerialThermalPrint.MAX_WIDTH, 
+          canvasWidth - drawingOffset, 0, canvasWidth, SerialThermalPrint.MAX_WIDTH);
+      } else {
+        image(drawn, 0, 0, drawingOffset, SerialThermalPrint.MAX_WIDTH, 
+            drawn.width-drawingOffset, 0, drawn.width, SerialThermalPrint.MAX_WIDTH);
+      }
+      translate(drawingOffset, 0);
+      image(drawing, 0, 0, canvasWidth - drawingOffset, SerialThermalPrint.MAX_WIDTH,
+          0, 0, canvasWidth - drawingOffset, SerialThermalPrint.MAX_WIDTH);
+      if (m_bLooping || m_bCopyMode){
+        strokeWeight(1);
+        stroke(255,0,255, 127);
+        line(0, 0, 0, SerialThermalPrint.MAX_WIDTH);
+      }
+      popMatrix();
+      drawHelp();
+      drawInfo();
+      drawCursor();
+      printLine();
+      break;
   }
-  rotate(m_nCurrRotation);
-  translate(-canvasWidth/2, -SerialThermalPrint.MAX_WIDTH/2);
-  if (m_bLooping){
-    image(drawing, 0, 0, drawingOffset, SerialThermalPrint.MAX_WIDTH, 
-      canvasWidth - drawingOffset, 0, canvasWidth, SerialThermalPrint.MAX_WIDTH);
-  } else {
-    image(drawn, 0, 0, drawingOffset, SerialThermalPrint.MAX_WIDTH, 
-        drawn.width-drawingOffset, 0, drawn.width, SerialThermalPrint.MAX_WIDTH);
-  }
-  translate(drawingOffset, 0);
-  image(drawing, 0, 0, canvasWidth - drawingOffset, SerialThermalPrint.MAX_WIDTH,
-      0, 0, canvasWidth - drawingOffset, SerialThermalPrint.MAX_WIDTH);
-  if (m_bLooping || m_bCopyMode){
-    strokeWeight(1);
-    stroke(255,0,255, 127);
-    line(0, 0, 0, SerialThermalPrint.MAX_WIDTH);
-  }
-  popMatrix();
-  drawHelp();
-  drawInfo();
-  drawCursor();
-  printLine();
 }
 
 private void drawCursor(){
@@ -183,7 +203,9 @@ private void drawHelp(){
 }
 
 private void printLine(){
-  if ((m_bPrinterReady || m_bTest) && drawNextLine < millis()){
+  if (currState == State.DRAWING && 
+      (m_bPrinterReady || m_bTest) && 
+      drawNextLine < millis()){
     drawNextLine = millis() + drawLineDelay;
     m_bPrinterReady = false;
     drawing.loadPixels();
@@ -203,32 +225,37 @@ private void printLine(){
     drawn.line(drawn.width-1, 0, drawn.width-1, drawn.height);
     drawn.endDraw();
     
-    drawing.beginDraw();
-    drawing.copy(1, 0, drawing.width-1, drawing.height, 0, 0, drawing.width-1, drawing.height);
-    if (m_bLooping || m_bCopyMode){
-      //TODO: why doesn't this work?!?
-      /*
-      drawing.pushMatrix();
-      drawing.translate(drawing.width-1, drawing.height);
-      drawing.rotate(-PI/2.0);
-      drawing.image(line, 0, 0);
-      drawing.popMatrix();
-      */
-    } else {
-      drawing.stroke(255);
-      drawing.strokeWeight(1);
-      drawing.line(canvasWidth-1, 0, canvasWidth-1, drawing.height);
-    }
-    drawing.endDraw();
-    
-    //NOTE: This feels like a temporary hack until 
-    //  I can figure out why the TODO above doesn't work
-    if (m_bLooping || m_bCopyMode){
-      line.loadPixels();
-      for(int i = 0; i < line.width; i++){
-        drawing.pixels[(canvasWidth-1)+(drawing.width*i)] = line.pixels[line.width-1-i];
+    drawingLock.lock();
+    try{
+      drawing.beginDraw();
+      drawing.copy(1, 0, drawing.width-1, drawing.height, 0, 0, drawing.width-1, drawing.height);
+      if (m_bLooping || m_bCopyMode){
+        //TODO: why doesn't this work?!?
+        /*
+        drawing.pushMatrix();
+        drawing.translate(drawing.width-1, drawing.height);
+        drawing.rotate(-PI/2.0);
+        drawing.image(line, 0, 0);
+        drawing.popMatrix();
+        */
+      } else {
+        drawing.stroke(255);
+        drawing.strokeWeight(1);
+        drawing.line(canvasWidth-1, 0, canvasWidth-1, drawing.height);
       }
-      drawing.updatePixels();
+      drawing.endDraw();
+    
+      //NOTE: This feels like a temporary hack until 
+      //  I can figure out why the TODO above doesn't work
+      if (m_bLooping || m_bCopyMode){
+        line.loadPixels();
+        for(int i = 0; i < line.width; i++){
+          drawing.pixels[(canvasWidth-1)+(drawing.width*i)] = line.pixels[line.width-1-i];
+        }
+        drawing.updatePixels();
+      }
+    } finally {
+      drawingLock.unlock();
     }
     
     if (m_bMoveOffset){
@@ -251,32 +278,39 @@ public void onPrinterReady(){
 }
 
 void mouseDragged(){
-  if (m_bMove){
-    drawingOffset += (mouseX - pmouseX); 
-    if (m_bLooping){
-      //TODO: this doesn't work when the canvas is rotated
-      drawingOffset %= canvasWidth;
-      while (drawingOffset < 0){
-        drawingOffset += canvasWidth;
+  switch(currState){
+    case DRAWING:
+      if (m_bMove){
+        drawingOffset += (mouseX - pmouseX); 
+        if (m_bLooping){
+          //TODO: this doesn't work when the canvas is rotated
+          drawingOffset %= canvasWidth;
+          while (drawingOffset < 0){
+            drawingOffset += canvasWidth;
+          }
+        } else {
+          drawingOffset = constrain(drawingOffset, 0, canvasWidth);
+        }
+      } else if (m_bRotate){
+        //TODO: should the rotation update happen here instead of in the draw loop?
+        //  probably
+      } else if (m_bAdjustCanvasWidth){
+        canvasWidth = constrain(canvasWidth + (mouseX - pmouseX), 1, maxCanvasWidth);
+      } else {
+        drawLineOnCanvas(mouseX, mouseY, pmouseX, pmouseY);
+        /*if (m_bLooping){
+          drawLineOnCanvas(mouseX + canvasWidth, mouseY, pmouseX + canvasWidth, pmouseY);
+        }*/
       }
-    } else {
-      drawingOffset = constrain(drawingOffset, 0, canvasWidth);
-    }
-  } else if (m_bRotate){
-    //TODO: should the rotation update happen here instead of in the draw loop?
-    //  probably
-  } else if (m_bAdjustCanvasWidth){
-    canvasWidth = constrain(canvasWidth + (mouseX - pmouseX), 1, maxCanvasWidth);
-  } else {
-    drawLineOnCanvas(mouseX, mouseY, pmouseX, pmouseY);
-    /*if (m_bLooping){
-      drawLineOnCanvas(mouseX + canvasWidth, mouseY, pmouseX + canvasWidth, pmouseY);
-    }*/
+      break;
   }
 }
 
 void drawLineOnCanvas(int mouseX, int mouseY, int pmouseX, int pmouseY){
+  drawingLock.lock();
+  try{
     drawing.beginDraw();
+    drawing.strokeWeight(m_nCurrStroke);
     drawing.stroke(m_bErase ? 255 : 0);
     drawing.pushMatrix();
     adjustForDrawing();
@@ -291,18 +325,26 @@ void drawLineOnCanvas(int mouseX, int mouseY, int pmouseX, int pmouseY){
     }
     cleanUpOverdraw();
     drawing.endDraw();
+  } finally {
+    drawingLock.unlock();
+  }
 }
 
 private void drawEllipseOnCanvas(int mouseX, int mouseY){
-  drawing.beginDraw();
-  drawing.fill(m_bErase ? 255 : 0);
-  drawing.noStroke();
-  drawing.pushMatrix();
-  adjustForDrawing();
-  drawing.ellipse(mouseX, mouseY, m_nCurrStroke, m_nCurrStroke);
-  drawing.popMatrix();
-  cleanUpOverdraw();
-  drawing.endDraw();
+  drawingLock.lock();
+  try{
+    drawing.beginDraw();
+    drawing.fill(m_bErase ? 255 : 0);
+    drawing.noStroke();
+    drawing.pushMatrix();
+    adjustForDrawing();
+    drawing.ellipse(mouseX, mouseY, m_nCurrStroke, m_nCurrStroke);
+    drawing.popMatrix();
+    cleanUpOverdraw();
+    drawing.endDraw();
+  } finally {
+    drawingLock.unlock();
+  }
 }
 
 void adjustForDrawing(){
@@ -324,9 +366,13 @@ float getMouseAngle(){
 }
 
 void mousePressed(){
-  if (m_bRotate){
-    m_nMouseStartRotation = getMouseAngle();
-    m_nCanvasStartRotation = m_nCurrRotation;
+  switch(currState){
+    case DRAWING:
+      if (m_bRotate){
+        m_nMouseStartRotation = getMouseAngle();
+        m_nCanvasStartRotation = m_nCurrRotation;
+      }
+      break;
   }
 }
 
@@ -338,18 +384,29 @@ void updateCanvasRotation(){
 }
 
 void mouseReleased(){
-  if (m_bRotate){
-    updateCanvasRotation();
+  switch(currState){
+    case DRAWING:
+      if (m_bRotate){
+        updateCanvasRotation();
+      }
+      break;
   }
 }
 
 void mouseClicked(){
-  if (m_bMove || m_bRotate){
-    return;
-  }
-  drawEllipseOnCanvas(mouseX, mouseY);
-  if (m_bLooping){
-    drawEllipseOnCanvas(mouseX + canvasWidth, mouseY);
+  switch(currState){
+    case START:
+      startScreen.mouseClicked();
+      break;
+    case DRAWING:
+      if (m_bMove || m_bRotate){
+        return;
+      }
+      drawEllipseOnCanvas(mouseX, mouseY);
+      if (m_bLooping){
+        drawEllipseOnCanvas(mouseX + canvasWidth, mouseY);
+      }
+      break;
   }
 }
 
@@ -396,6 +453,30 @@ void keyPressed(){
     } else if (keyCode == SHIFT){
       m_bShift = true;
     }
+  } else if (key == '`'){
+    //p.printer.write("shello world");
+    //p.printer.write(255);
+    //p.forceReady();
+    //onPrinterReady();
+    
+    /*try{
+      p.connect(Serial.list()[0], baudRate);
+    } catch(Exception e){
+      println("failed to connect to printer. Entering test mode.");
+      println(e);
+      println(e.getStackTrace());
+      println(p);
+      //m_bTest = true;
+      //p = null;
+    }*/
+  } else if (key == 27){//esc
+    if (currState == State.DRAWING){
+      key = 0;
+      currState = State.START;
+      cursor();
+      //TODO: there may be some cleanup if we want to change
+      //  Serial devices
+    }
   }
 }
 
@@ -421,5 +502,10 @@ void keyReleased(){
 }
 
 void serialEvent(Serial port){
-  p.serialEvent(port);
+  try{
+    p.serialEvent(port);
+  }catch (Exception e) {
+    println(e);
+    println(e.getStackTrace());
+  }
 }
